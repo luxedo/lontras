@@ -8,8 +8,11 @@ import statistics
 from collections import UserDict
 from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 from functools import reduce
-from typing import Any, Generic, Literal, Self, TypeAlias, TypeGuard, TypeVar, Union, overload
+from typing import Any, Generic, Literal, Self, TypeAlias, TypeGuard, TypeVar, Union, assert_never, overload
 
+###########################################################################
+# Typing
+###########################################################################
 AxisRows = 0
 AxisCols = 1
 Axis: TypeAlias = Literal[0, 1]
@@ -21,26 +24,34 @@ LocIndexes: TypeAlias = Union[Scalar, list[Scalar], slice, "Series"]
 IlocIndexes: TypeAlias = Union[int, list[int], slice, "Series"]
 LocDataFrameReturn: TypeAlias = Union["DataFrame", "Series", Scalar]
 LocSeriesReturn: TypeAlias = Union["Series", Scalar]
-ReturnType = TypeVar("ReturnType", "Series", "DataFrame", Scalar)
 T = TypeVar("T", "Series", "DataFrame")
 
 
-def _is_array_like(value) -> TypeGuard[ArrayLike]:
-    return isinstance(value, Collection) and not isinstance(value, DataFrame)
+def _is_array_like(value: Any) -> TypeGuard[ArrayLike]:
+    return isinstance(value, Collection) and not isinstance(value, (str, DataFrame)) and not _is_scalar(value)
 
 
 def _is_scalar(value: Any) -> TypeGuard[Scalar]:
     return isinstance(value, (int, float, complex, str, bool))
 
 
+###########################################################################
+# Indexers
+###########################################################################
 class BaseScalar(Generic[T]):
     data: T
 
     def __init__(self, data: T):
         self.data = data
 
-    def _is_boolean_mask(self, s: Series) -> bool:
-        return self.data.index == s.index and s.map(lambda v: isinstance(v, bool)).all()
+    def _is_boolean_mask(self, s: Series | Sequence[object]) -> bool:
+        match s:
+            case Series():
+                return self.data.index == s.index and s.map(lambda v: isinstance(v, bool)).all()
+            case Sequence():
+                return all(isinstance(b, bool) for b in s)
+            case _:  # no cov
+                assert_never(s)
 
     def _index_to_labels(self, index: IlocIndexes) -> Scalar | list[Scalar]:
         match index:
@@ -49,12 +60,15 @@ class BaseScalar(Generic[T]):
             case slice():
                 return list(self.data.index[index])
             case list():
+                if self._is_boolean_mask(index):
+                    return [self.data.index[i] for i, v in enumerate(index) if v is True]
                 return [self.data.index[i] for i in index]
             case Series():
                 if self._is_boolean_mask(index):
-                    return [self.data.index[i] for i in index if index is True]
-                return [self.data.index[i] for i in index]
-        msg = f"Passing {type(index)} as an indexer is not supported. Use list instead"
+                    msg = "iLocation based boolean indexing cannot use an indexable as a mask"
+                    raise ValueError(msg)
+                return [self.data.index[i] for i in index.values]
+        msg = f"Cannot index with unhashable: {index=}"
         raise TypeError(msg)
 
 
@@ -74,11 +88,13 @@ class LocSeriesIndexer(BaseScalar["Series"]):
         msg = f"Cannot index with unhashable: {label=}"
         raise TypeError(msg)
 
-    def __setitem__(self, label: LocIndexes, value: Scalar | ArrayLike):
+    def __setitem__(self, label: LocIndexes, value: Scalar | ArrayLike | Mapping | Series):
         labels: list[Scalar]
         match label:
             case list():
                 labels = label
+            case Series():
+                labels = list(label.values)
             case slice():
                 labels = list(self.data.index[label])
             case _ if _is_scalar(label):
@@ -88,13 +104,23 @@ class LocSeriesIndexer(BaseScalar["Series"]):
                 raise TypeError(msg)
 
         values: list[Any]
-        if not _is_array_like(value):
-            values = [value for _ in range(len(labels))]
-        else:
-            if len(labels) != len(value):
-                msg = "cannot set using a list-like indexer with a different length than the valuel"
-                raise ValueError(msg)
-            values = list(value)
+        match value:
+            case Series():
+                values = list(value.values)
+                if set(labels) != set(value.index):
+                    msg = "cannot set using a Series with different index"
+                    raise ValueError(msg)
+            case Mapping():
+                if set(labels) != set(value.keys()):
+                    msg = "cannot set using a Mapping with different keys"
+                    raise ValueError(msg)
+                values = [value[b] for b in labels]
+            case v if _is_array_like(v):
+                values = list(value)
+            case v if _is_scalar(v):
+                values = [value for _ in range(len(labels))]
+            case _ as unreachable:  # no cov
+                assert_never(unreachable)  # type: ignore # @TODO: How to exhaust this check?
 
         for k, v in zip(labels, values):
             self.data[k] = v
@@ -102,37 +128,37 @@ class LocSeriesIndexer(BaseScalar["Series"]):
 
 class IlocSeriesIndexer(BaseScalar["Series"]):
     @overload
-    def __getitem__(self, index: int) -> Scalar: ...
+    def __getitem__(self, index: int) -> Scalar: ...  # no cov
     @overload
-    def __getitem__(self, index: list[int] | slice | Series) -> Series: ...
+    def __getitem__(self, index: list[int] | slice | Series) -> Series: ...  # no cov
     def __getitem__(self, index: IlocIndexes) -> Scalar | Series:
         return self.data.loc.__getitem__(self._index_to_labels(index))
 
-    def __setitem__(self, index: IlocIndexes, value: Scalar | ArrayLike):
+    def __setitem__(self, index: IlocIndexes, value: Scalar | ArrayLike | Mapping | Series):
         self.data.loc.__setitem__(self._index_to_labels(index), value)
 
 
 class LocDataFrameIndexer(BaseScalar["DataFrame"]):
-    def _select_columns(self, col_labels: LocIndexes) -> DataFrame | Series:
-        match col_labels:
+    def _select_columns(self, label: LocIndexes) -> DataFrame | Series:
+        match label:
             case list():
-                return DataFrame({k: self.data[k] for k in col_labels}, columns=col_labels)
+                return DataFrame({k: self.data[k] for k in label}, columns=label)
             case slice():
-                columns = self.data.columns[col_labels]
+                columns = self.data.columns[label]
                 return DataFrame({k: self.data[k] for k in columns}, columns=columns)
             case Series():
-                columns = col_labels.values
+                columns = label.values
                 return DataFrame({k: self.data[k] for k in columns}, columns=columns)
-            case _ if _is_scalar(col_labels):
-                return self.data[col_labels]
-        msg = "nooo"
-        raise ValueError(msg)
+            case _ if _is_scalar(label):
+                return self.data[label]
+        msg = f"Cannot index with unhashable: {label=}"
+        raise TypeError(msg)
 
     @overload
-    def _columns_to_labels(self, index: int) -> Scalar: ...
+    def _columns_to_labels(self, index: int) -> Scalar: ...  # no cov
     @overload
-    def _columns_to_labels(self, index: slice | list[int] | Series) -> list[Scalar]: ...
-    def _columns_to_labels(self, index: int | slice | list[int] | Series) -> Scalar | list[Scalar]:
+    def _columns_to_labels(self, index: slice | list[int] | Series) -> list[Scalar]: ...  # no cov
+    def _columns_to_labels(self, index: IlocIndexes) -> Scalar | list[Scalar]:
         match index:
             case int():
                 return self.data.columns[index]
@@ -141,18 +167,16 @@ class LocDataFrameIndexer(BaseScalar["DataFrame"]):
             case list():
                 return [self.data.columns[i] for i in index]
             case Series():
-                if self._is_boolean_mask(index):
-                    return [self.data.columns[i] for i in index if index is True]
                 return [self.data.columns[i] for i in index]
-        msg = f"Passing {type(index)} as an indexer is not supported. Use list instead"
+        msg = f"Cannot index with unhashable: {index=}"
         raise TypeError(msg)
 
     @overload
-    def __getitem__(self, label: tuple[Scalar, Scalar]) -> Scalar: ...
+    def __getitem__(self, label: tuple[Scalar, Scalar]) -> Scalar: ...  # no cov
     @overload
-    def __getitem__(self, label: Scalar | tuple[Scalar, Any] | tuple[Any, Scalar]) -> Series: ...
+    def __getitem__(self, label: Scalar | tuple[Scalar, Any] | tuple[Any, Scalar]) -> Series: ...  # no cov
     @overload
-    def __getitem__(self, label: Any) -> DataFrame: ...
+    def __getitem__(self, label: Any) -> DataFrame: ...  # no cov
     def __getitem__(self, label: LocIndexes | tuple[LocIndexes, LocIndexes]) -> LocDataFrameReturn:
         match label:
             case (row_labels, col_labels) if isinstance(label, tuple):
@@ -168,7 +192,7 @@ class LocDataFrameIndexer(BaseScalar["DataFrame"]):
                 msg = f"Cannot index with unhashable: {label=}"
                 raise TypeError(msg)
 
-    def __setitem__(self, label: LocIndexes | tuple[LocIndexes, LocIndexes], value: Scalar | Mapping | DataFrame):
+    def __setitem__(self, label: LocIndexes | tuple[LocIndexes, LocIndexes], value: Scalar | ArrayLike | Mapping):
         col_labels: LocIndexes
         row_labels: LocIndexes
         match label:
@@ -195,17 +219,34 @@ class LocDataFrameIndexer(BaseScalar["DataFrame"]):
                 msg = f"Cannot index with unhashable: {label=}"
                 raise TypeError(msg)
 
-        for col in col_labels:
-            self.data.data[col].loc[row_labels] = value
+        match value:
+            case v if _is_scalar(v):
+                for col in col_labels:
+                    self.data.data[col].loc[row_labels] = value
+            case Mapping():
+                if set(value.keys()) != set(col_labels):
+                    msg = "cannot set using a Mapping with different keys"
+                    raise ValueError(msg)
+                for col, val in value.items():
+                    self.data.data[col].loc[row_labels] = val
+            case v if _is_array_like(v):
+                if len(value) != len(col_labels):
+                    msg = "cannot set using a list-like indexer with a different length than the value"
+                    raise ValueError(msg)
+                for col, val in zip(col_labels, value):
+                    self.data.data[col].loc[row_labels] = val
+            case _:  # no cov
+                msg = f"Cannot set with: {value=}"
+                raise TypeError(msg)
 
 
 class IlocDataFrameIndexer(BaseScalar["DataFrame"]):
     @overload
-    def __getitem__(self, index: tuple[int, int]) -> Scalar: ...
+    def __getitem__(self, index: tuple[int, int]) -> Scalar: ...  # no cov
     @overload
-    def __getitem__(self, index: int | tuple[int, Any] | tuple[Any, int]) -> Series: ...
+    def __getitem__(self, index: int | tuple[int, Any] | tuple[Any, int]) -> Series: ...  # no cov
     @overload
-    def __getitem__(self, index: Any) -> DataFrame: ...
+    def __getitem__(self, index: Any) -> DataFrame: ...  # no cov
     def __getitem__(self, index: IlocIndexes | tuple[IlocIndexes, IlocIndexes]) -> LocDataFrameReturn:
         match index:
             case (row_indexes, col_indexes) if isinstance(index, tuple):
@@ -215,7 +256,7 @@ class IlocDataFrameIndexer(BaseScalar["DataFrame"]):
             case _:
                 return self.data.loc.__getitem__(self._index_to_labels(index))  # type: ignore
 
-    def __setitem__(self, index: IlocIndexes, value: Scalar | Mapping | DataFrame):
+    def __setitem__(self, index: IlocIndexes, value: Scalar | ArrayLike | Mapping):
         match index:
             case (row_indexes, col_indexes) if isinstance(index, tuple):
                 return self.data.loc.__setitem__(
@@ -226,6 +267,9 @@ class IlocDataFrameIndexer(BaseScalar["DataFrame"]):
                 return self.data.loc.__setitem__(self._index_to_labels(index), value)
 
 
+###########################################################################
+# Series
+###########################################################################
 class Series(UserDict):
     """
     Series class representing a one-dimensional labeled array with capabilities for data analysis.
@@ -1169,6 +1213,9 @@ class Series(UserDict):
         return Series({k: ~v for k, v in self.items()})
 
 
+###########################################################################
+# DataFrame
+###########################################################################
 class DataFrame(UserDict):
     """
     DataFrame class representing a two-dimensional, size-mutable, tabular data structure with
@@ -1417,26 +1464,26 @@ class DataFrame(UserDict):
     # Accessors
     ###########################################################################
     @overload
-    def __getitem__(self, name: Scalar) -> Series: ...
+    def __getitem__(self, index: Scalar) -> Series: ...  # no cov
     @overload
-    def __getitem__(self, name: list[Scalar] | slice | Series) -> DataFrame: ...
-    def __getitem__(self, name: Scalar | list[Scalar] | slice | Series) -> LocDataFrameReturn:
+    def __getitem__(self, index: list[Scalar] | slice | Series) -> DataFrame: ...  # no cov
+    def __getitem__(self, index: Scalar | list[Scalar] | slice | Series) -> LocDataFrameReturn:
         """
         Retrieves an item or slice from the DataFrame.
 
         Args:
-            name (Scalar | list[Scalar] | slice): The key, list of keys, or slice to retrieve.
+            index (Scalar | list[Scalar] | slice): The key, list of keys, or slice to retrieve.
 
         Returns:
             Series | DataFRame: A new Series if a single column is selected or a DataFrame for multiple columns
         """
-        if isinstance(name, (list, Series)):
-            if self.loc._is_boolean_mask(Series(name)):  # noqa: SLF001
-                return self.loc[name]
-            return self.loc[:, name]
-        if isinstance(name, slice):
-            return self.iloc[name]
-        return super().__getitem__(name)
+        if isinstance(index, (list, Series)):
+            if self.loc._is_boolean_mask(Series(index)):  # noqa: SLF001
+                return self.loc[index]
+            return self.loc[:, index]
+        if isinstance(index, slice):
+            return self.iloc[index]
+        return super().__getitem__(index)
 
     def head(self, n: int = 5) -> DataFrame:
         """

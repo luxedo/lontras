@@ -10,7 +10,9 @@
 
 ---
 
-> ### ⚠️ This library is under development and has not been released yet
+> ### ⚠️ This library is under development and has not been released yet⚠️
+>
+> ### The API is not stable and might change over time
 
 > We love `pandas` and its siblings! They're the industry-standard tools for powerful data
 > manipulation. However, for smaller projects or when minimizing dependencies is paramount,

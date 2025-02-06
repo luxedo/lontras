@@ -215,7 +215,7 @@ class TestSeriesAccessors:
         value = 4
         s.loc[key] = value
         ps.loc[key] = value
-        assert s.loc[key] == ps[key]
+        assert_series_equal_pandas(s, ps)
 
     def test_loc_getitem_list(self):
         s = lt.Series(example_dict)
@@ -230,7 +230,7 @@ class TestSeriesAccessors:
         value = 4
         s.loc[keys] = value
         ps.loc[keys] = value
-        assert_series_equal_pandas(s.loc[keys], ps.loc[keys])
+        assert_series_equal_pandas(s, ps)
 
     def test_loc_setitem_list_and_collection_value(self):
         s = lt.Series(example_dict)
@@ -239,7 +239,56 @@ class TestSeriesAccessors:
         value = [40, 50]
         s.loc[keys] = value
         ps.loc[keys] = value
-        assert_series_equal_pandas(s.loc[keys], ps.loc[keys])
+        assert_series_equal_pandas(s, ps)
+
+    def test_loc_getitem_series(self):
+        s = lt.Series(example_dict)
+        ps = pd.Series(example_dict)
+        mask = ["a", "c"]
+        mask_s = lt.Series(mask)
+        mask_ps = pd.Series(mask)
+        assert_series_equal_pandas(s.loc[mask_s], ps.loc[mask_ps])
+
+    def test_loc_setitem_series(self):
+        s = lt.Series(example_dict)
+        ps = pd.Series(example_dict)
+        index = ["a", "c"]
+        value = [0, 1000]
+        s_set = lt.Series(value, index=index)
+        ps_set = pd.Series(value, index=index)
+        s.loc[index] = s_set
+        ps.loc[index] = ps_set
+        assert_series_equal_pandas(s, ps)
+
+    def test_loc_setitem_series_error(self):
+        s = lt.Series(example_dict)
+        s_set = lt.Series([0, 1000], index=["a", "c"])
+        with pytest.raises(ValueError, match="cannot set using a Series with different index"):
+            s.loc["a"] = s_set
+
+    def test_loc_getitem_mask_series(self):
+        s = lt.Series(example_dict)
+        ps = pd.Series(example_dict)
+        mask = [col == "a" for col in example_dict]
+        mask_s = lt.Series(mask, index=example_dict.keys())
+        mask_ps = pd.Series(mask, index=example_dict.keys())
+        assert_series_equal_pandas(s.loc[mask_s], ps.loc[mask_ps])
+
+    def test_loc_setitem_mapping(self):
+        s = lt.Series(example_dict)
+        ps = pd.Series(example_dict)
+        keys = ["a"]
+        value = {"a": 40}
+        s.loc[keys] = value
+        ps.loc[keys] = value
+        assert_series_equal_pandas(s, ps)
+
+    def test_loc_setitem_mapping_error(self):
+        s = lt.Series(example_dict)
+        keys = ["a"]
+        value = {"a": 40, "c": 80}
+        with pytest.raises(ValueError, match="cannot set using a Mapping with different keys"):
+            s.loc[keys] = value
 
     def test_loc_get_not_hashable_key(self):
         s = lt.Series(example_dict)
@@ -268,7 +317,7 @@ class TestSeriesAccessors:
         value = 4
         s.iloc[index] = value
         ps.iloc[index] = value
-        assert s.iloc[index] == ps.iloc[index]
+        assert_series_equal_pandas(s, ps)
 
     def test_iloc_getitem_slice(self):
         s = lt.Series(example_dict)
@@ -283,7 +332,7 @@ class TestSeriesAccessors:
         value = 4
         s.iloc[indexes] = value
         ps.iloc[indexes] = value
-        assert_series_equal_pandas(s.iloc[indexes], ps.iloc[indexes])
+        assert_series_equal_pandas(s, ps)
 
     def test_iloc_getitem_list(self):
         s = lt.Series(example_dict)
@@ -298,7 +347,7 @@ class TestSeriesAccessors:
         value = 4
         s.iloc[indexes] = value
         ps.iloc[indexes] = value
-        assert_series_equal_pandas(s.iloc[indexes], ps.iloc[indexes])
+        assert_series_equal_pandas(s, ps)
 
     def test_iloc_setitem_list_and_collection_value(self):
         s = lt.Series(example_dict)
@@ -307,11 +356,33 @@ class TestSeriesAccessors:
         value = [31, 32]
         s.iloc[indexes] = value
         ps.iloc[indexes] = value
-        assert_series_equal_pandas(s.iloc[indexes], ps.iloc[indexes])
+        assert_series_equal_pandas(s, ps)
+
+    def test_iloc_getitem_series(self):
+        s = lt.Series(example_dict)
+        ps = pd.Series(example_dict)
+        mask = [0, 2]
+        mask_s = lt.Series(mask)
+        mask_ps = pd.Series(mask)
+        assert_series_equal_pandas(s.iloc[mask_s], ps.iloc[mask_ps])
+
+    def test_iloc_getitem_mask_series(self):
+        s = lt.Series(example_dict)
+        ps = pd.Series(example_dict)
+        mask = [col == "a" for col in example_dict]
+        mask_s = lt.Series(mask, index=example_dict.keys())
+        mask_ps = pd.Series(mask, index=example_dict.keys())
+        assert_exception(lambda: ps.iloc[mask_ps], lambda: s.iloc[mask_s], ValueError)
+
+    def test_iloc_getitem_mask(self):
+        s = lt.Series(example_dict)
+        ps = pd.Series(example_dict)
+        mask = [col == "a" for col in example_dict]
+        assert_series_equal_pandas(s.iloc[mask], ps.iloc[mask])
 
     def test_iloc_get_error(self):
         s = lt.Series(example_dict)
-        with pytest.raises(TypeError, match="Passing .* as an indexer is not supported"):
+        with pytest.raises(TypeError, match="Cannot index"):
             s.iloc[{1, 2, 3}]
 
     def test_loc_set_error(self):
